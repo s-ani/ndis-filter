@@ -1,0 +1,46 @@
+# Build Artifacts
+**/bin/
+**/obj/
+**/x64/
+**/Debug/
+**/Release/
+
+# Visual Studio
+*.user
+*.suo
+*.sln.docstates
+*.userprefs
+.vs/
+
+# Driver specific
+*.sys
+*.pdb
+*.cat
+*.log
+*.recipe
+*.tlog/
+*.pch
+*.obj
+*.res
+*.FileListAbsolute.txt
+*.lastbuildstate
+*.cache
+
+# Logs
+*.log
+PacketFilterLogs/
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# .NET
+*.dll
+*.exe
+*.config
+!App.config
+
+# Temporary files
+*.tmp
+*.temp 
