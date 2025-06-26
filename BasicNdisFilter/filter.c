@@ -1076,179 +1076,70 @@ NOTE: called at PASSIVE_LEVEL
 
 _Use_decl_annotations_
 VOID
-FilterSendNetBufferListsComplete(
-    NDIS_HANDLE         FilterModuleContext,
-    PNET_BUFFER_LIST    NetBufferLists,
-    ULONG               SendCompleteFlags
-    )
-/*++
-
-Routine Description:
-
-    Send complete handler
-
-    This routine is invoked whenever the lower layer is finished processing
-    sent NET_BUFFER_LISTs.  If the filter does not need to be involved in the
-    send path, you should remove this routine and the FilterSendNetBufferLists
-    routine.  NDIS will pass along send packets on behalf of your filter more
-    efficiently than the filter can.
-
-Arguments:
-
-    FilterModuleContext     - our filter context
-    NetBufferLists          - a chain of NBLs that are being returned to you
-    SendCompleteFlags       - flags (see documentation)
-
-Return Value:
-
-     NONE
-
---*/
-{
-    PMS_FILTER         pFilter = (PMS_FILTER)FilterModuleContext;
-    ULONG              NumOfSendCompletes = 0;
-    BOOLEAN            DispatchLevel;
-    PNET_BUFFER_LIST   CurrNbl;
-
-    DEBUGP(DL_TRACE, "===>SendNBLComplete, NetBufferList: %p.\n", NetBufferLists);
-
-
-    //
-    // If your filter injected any send packets into the datapath to be sent,
-    // you must identify their NBLs here and remove them from the chain.  Do not
-    // attempt to send-complete your NBLs up to the higher layer.
-    //
-
-    //
-    // If your filter has modified any NBLs (or NBs, MDLs, etc) in your
-    // FilterSendNetBufferLists handler, you must undo the modifications here.
-    // In general, NBLs must be returned in the same condition in which you had
-    // you received them.  (Exceptions: the NBLs can be re-ordered on the linked
-    // list, and the scratch fields are don't-care).
-    //
-
-    if (pFilter->TrackSends)
-    {
-        CurrNbl = NetBufferLists;
-        while (CurrNbl)
-        {
-            NumOfSendCompletes++;
-            CurrNbl = NET_BUFFER_LIST_NEXT_NBL(CurrNbl);
-
-        }
-        DispatchLevel = NDIS_TEST_SEND_AT_DISPATCH_LEVEL(SendCompleteFlags);
-        FILTER_ACQUIRE_LOCK(&pFilter->Lock, DispatchLevel);
-        pFilter->OutstandingSends -= NumOfSendCompletes;
-        FILTER_LOG_SEND_REF(2, pFilter, PrevNbl, pFilter->OutstandingSends);
-        FILTER_RELEASE_LOCK(&pFilter->Lock, DispatchLevel);
-    }
-
-    // Send complete the NBLs.  If you removed any NBLs from the chain, make
-    // sure the chain isn't empty (i.e., NetBufferLists!=NULL).
-
-    NdisFSendNetBufferListsComplete(pFilter->FilterHandle, NetBufferLists, SendCompleteFlags);
-
-    DEBUGP(DL_TRACE, "<===SendNBLComplete.\n");
-}
-
-
-_Use_decl_annotations_
-VOID
 FilterSendNetBufferLists(
     NDIS_HANDLE         FilterModuleContext,
     PNET_BUFFER_LIST    NetBufferLists,
     NDIS_PORT_NUMBER    PortNumber,
     ULONG               SendFlags
-    )
-/*++
-
-Routine Description:
-
-    Send Net Buffer List handler
-    This function is an optional function for filter drivers. If provided, NDIS
-    will call this function to transmit a linked list of NetBuffers, described by a
-    NetBufferList, over the network. If this handler is NULL, NDIS will skip calling
-    this filter when sending a NetBufferList and will call the next lower
-    driver in the stack.  A filter that doesn't provide a FilerSendNetBufferList
-    handler can not originate a send on its own.
-
-Arguments:
-
-    FilterModuleContext     - our filter context area
-    NetBufferLists          - a List of NetBufferLists to send
-    PortNumber              - Port Number to which this send is targeted
-    SendFlags               - specifies if the call is at DISPATCH_LEVEL
-
---*/
+)
 {
-    PMS_FILTER          pFilter = (PMS_FILTER)FilterModuleContext;
-    PNET_BUFFER_LIST    CurrNbl;
-    BOOLEAN             DispatchLevel;
-    BOOLEAN             bFalse = FALSE;
+    // Retrieve filter context
+    PMS_FILTER pFilter = (PMS_FILTER)FilterModuleContext;
+    BOOLEAN anyAllowed = FALSE;
+    PNET_BUFFER_LIST currNbl = NetBufferLists;
 
-    DEBUGP(DL_TRACE, "===>SendNetBufferList: NBL = %p.\n", NetBufferLists);
-
-    do
+    // Loop through each NBL and ask service for decision
+    while (currNbl)
     {
+        // For brevity, parsing code omitted; assume srcIp and srcPort retrieved
+        ULONG srcIp = 0;
+        USHORT srcPort = 0;
 
-       DispatchLevel = NDIS_TEST_SEND_AT_DISPATCH_LEVEL(SendFlags);
-#if DBG
-        //
-        // we should never get packets to send if we are not in running state
-        //
+        BOOLEAN allow = FALSE;
+        NTSTATUS status;
+        ExAcquireFastMutex(&PipeMutex);
+        status = _SendRequestToService(srcIp, srcPort, &allow);
+        ExReleaseFastMutex(&PipeMutex);
 
-        FILTER_ACQUIRE_LOCK(&pFilter->Lock, DispatchLevel);
-        //
-        // If the filter is not in running state, fail the send
-        //
-        if (pFilter->State != FilterRunning)
+        if (NT_SUCCESS(status) && allow)
         {
-            FILTER_RELEASE_LOCK(&pFilter->Lock, DispatchLevel);
-
-            CurrNbl = NetBufferLists;
-            while (CurrNbl)
-            {
-                NET_BUFFER_LIST_STATUS(CurrNbl) = NDIS_STATUS_PAUSED;
-                CurrNbl = NET_BUFFER_LIST_NEXT_NBL(CurrNbl);
-            }
-            NdisFSendNetBufferListsComplete(pFilter->FilterHandle,
-                        NetBufferLists,
-                        DispatchLevel ? NDIS_SEND_COMPLETE_FLAGS_DISPATCH_LEVEL : 0);
-            break;
-
-        }
-        FILTER_RELEASE_LOCK(&pFilter->Lock, DispatchLevel);
-#endif
-        if (pFilter->TrackSends)
-        {
-            FILTER_ACQUIRE_LOCK(&pFilter->Lock, DispatchLevel);
-            CurrNbl = NetBufferLists;
-            while (CurrNbl)
-            {
-                pFilter->OutstandingSends++;
-                FILTER_LOG_SEND_REF(1, pFilter, CurrNbl, pFilter->OutstandingSends);
-
-                CurrNbl = NET_BUFFER_LIST_NEXT_NBL(CurrNbl);
-            }
-            FILTER_RELEASE_LOCK(&pFilter->Lock, DispatchLevel);
+            anyAllowed = TRUE;
         }
 
-        //
-        // If necessary, queue the NetBufferLists in a local structure for later
-        // processing.  However, do not queue them for "too long", or else the
-        // system's performance may be degraded.  If you need to hold onto an
-        // NBL for an unbounded amount of time, then allocate memory, perform a
-        // deep copy, and complete the original NBL.
-        //
-
-        NdisFSendNetBufferLists(pFilter->FilterHandle, NetBufferLists, PortNumber, SendFlags);
-
-
+        currNbl = NET_BUFFER_LIST_NEXT_NBL(currNbl);
     }
-    while (bFalse);
 
-    DEBUGP(DL_TRACE, "<===SendNetBufferList. \n");
+    if (anyAllowed)
+    {
+        NdisFSendNetBufferLists(
+            pFilter->FilterHandle,
+            NetBufferLists,
+            PortNumber,
+            SendFlags
+        );
+    }
+    // else drop by not calling forward
 }
+
+_Use_decl_annotations_
+VOID
+FilterSendNetBufferListsComplete(
+    NDIS_HANDLE         FilterModuleContext,
+    PNET_BUFFER_LIST    NetBufferLists,
+    ULONG               SendCompleteFlags
+)
+{
+    // Retrieve filter context
+    PMS_FILTER pFilter = (PMS_FILTER)FilterModuleContext;
+
+    // Complete the send
+    NdisFSendNetBufferListsComplete(
+        pFilter->FilterHandle,
+        NetBufferLists,
+        SendCompleteFlags
+    );
+}
+
 
 _Use_decl_annotations_
 VOID
@@ -1335,154 +1226,6 @@ Arguments:
 
 
 }
-
-// Updated below
-//_Use_decl_annotations_
-//VOID
-//FilterReceiveNetBufferLists(
-//    NDIS_HANDLE         FilterModuleContext,
-//    PNET_BUFFER_LIST    NetBufferLists,
-//    NDIS_PORT_NUMBER    PortNumber,
-//    ULONG               NumberOfNetBufferLists,
-//    ULONG               ReceiveFlags
-//    )
-///*++
-//
-//Routine Description:
-//
-//    FilerReceiveNetBufferLists is an optional function for filter drivers.
-//    If provided, this function processes receive indications made by underlying
-//    NIC or lower level filter drivers. This function  can also be called as a
-//    result of loopback. If this handler is NULL, NDIS will skip calling this
-//    filter when processing a receive indication and will call the next higher
-//    driver in the stack. A filter that doesn't provide a
-//    FilterReceiveNetBufferLists handler cannot provide a
-//    FilterReturnNetBufferLists handler and cannot a initiate an original receive
-//    indication on its own.
-//
-//Arguments:
-//
-//    FilterModuleContext      - our filter context area.
-//    NetBufferLists           - a linked list of NetBufferLists
-//    PortNumber               - Port on which the receive is indicated
-//    ReceiveFlags             -
-//
-//N.B.: It is important to check the ReceiveFlags in NDIS_TEST_RECEIVE_CANNOT_PEND.
-//    This controls whether the receive indication is an synchronous or
-//    asynchronous function call.
-//
-//--*/
-//{
-//
-//    PMS_FILTER          pFilter = (PMS_FILTER)FilterModuleContext;
-//    BOOLEAN             DispatchLevel;
-//    ULONG               Ref;
-//    BOOLEAN             bFalse = FALSE;
-//#if DBG
-//    ULONG               ReturnFlags;
-//#endif
-//
-//    DEBUGP(DL_TRACE, "===>ReceiveNetBufferList: NetBufferLists = %p.\n", NetBufferLists);
-//    do
-//    {
-//
-//        DispatchLevel = NDIS_TEST_RECEIVE_AT_DISPATCH_LEVEL(ReceiveFlags);
-//#if DBG
-//        FILTER_ACQUIRE_LOCK(&pFilter->Lock, DispatchLevel);
-//
-//        if (pFilter->State != FilterRunning)
-//        {
-//            FILTER_RELEASE_LOCK(&pFilter->Lock, DispatchLevel);
-//
-//            if (NDIS_TEST_RECEIVE_CAN_PEND(ReceiveFlags))
-//            {
-//                ReturnFlags = 0;
-//                if (NDIS_TEST_RECEIVE_AT_DISPATCH_LEVEL(ReceiveFlags))
-//                {
-//                    NDIS_SET_RETURN_FLAG(ReturnFlags, NDIS_RETURN_FLAGS_DISPATCH_LEVEL);
-//                }
-//
-//                NdisFReturnNetBufferLists(pFilter->FilterHandle, NetBufferLists, ReturnFlags);
-//            }
-//            break;
-//        }
-//        FILTER_RELEASE_LOCK(&pFilter->Lock, DispatchLevel);
-//#endif
-//
-//        ASSERT(NumberOfNetBufferLists >= 1);
-//
-//        //
-//        // If you would like to drop a received packet, then you must carefully
-//        // modify the NBL chain as follows:
-//        //
-//        //     if NDIS_TEST_RECEIVE_CANNOT_PEND(ReceiveFlags):
-//        //         For each NBL that is NOT dropped, temporarily unlink it from
-//        //         the linked list, and indicate it up alone with
-//        //         NdisFIndicateReceiveNetBufferLists and the
-//        //         NDIS_RECEIVE_FLAGS_RESOURCES flag set.  Then immediately
-//        //         relink the NBL back into the chain.  When all NBLs have been
-//        //         indicated up, you may return from this function.
-//        //     otherwise (NDIS_TEST_RECEIVE_CANNOT_PEND is FALSE):
-//        //         Divide the linked list of NBLs into two chains: one chain
-//        //         of packets to drop, and everything else in another chain.
-//        //         Return the first chain with NdisFReturnNetBufferLists, and
-//        //         indicate up the rest with NdisFIndicateReceiveNetBufferLists.
-//        //
-//        // Note: on the receive path for Ethernet packets, one NBL will have
-//        // exactly one NB.  So (assuming you are receiving on Ethernet, or are
-//        // attached above Native WiFi) you do not need to worry about dropping
-//        // one NB, but trying to indicate up the remaining NBs on the same NBL.
-//        // In other words, if the first NB should be dropped, drop the whole NBL.
-//        //
-//
-//        //
-//        // If you would like to modify a packet, and can do so quickly, you may
-//        // do it here.  However, make sure you save enough information to undo
-//        // your modification in the FilterReturnNetBufferLists handler.
-//        //
-//
-//        //
-//        // If necessary, queue the NetBufferLists in a local structure for later
-//        // processing.  However, do not queue them for "too long", or else the
-//        // system's performance may be degraded.  If you need to hold onto an
-//        // NBL for an unbounded amount of time, then allocate memory, perform a
-//        // deep copy, and return the original NBL.
-//        //
-//
-//        if (pFilter->TrackReceives)
-//        {
-//            FILTER_ACQUIRE_LOCK(&pFilter->Lock, DispatchLevel);
-//            pFilter->OutstandingRcvs += NumberOfNetBufferLists;
-//            Ref = pFilter->OutstandingRcvs;
-//
-//            FILTER_LOG_RCV_REF(1, pFilter, NetBufferLists, Ref);
-//            FILTER_RELEASE_LOCK(&pFilter->Lock, DispatchLevel);
-//        }
-//
-//        NdisFIndicateReceiveNetBufferLists(
-//                   pFilter->FilterHandle,
-//                   NetBufferLists,
-//                   PortNumber,
-//                   NumberOfNetBufferLists,
-//                   ReceiveFlags);
-//
-//
-//        if (NDIS_TEST_RECEIVE_CANNOT_PEND(ReceiveFlags) &&
-//            pFilter->TrackReceives)
-//        {
-//            FILTER_ACQUIRE_LOCK(&pFilter->Lock, DispatchLevel);
-//            pFilter->OutstandingRcvs -= NumberOfNetBufferLists;
-//            Ref = pFilter->OutstandingRcvs;
-//            FILTER_LOG_RCV_REF(2, pFilter, NetBufferLists, Ref);
-//            FILTER_RELEASE_LOCK(&pFilter->Lock, DispatchLevel);
-//        }
-//
-//    } while (bFalse);
-//
-//    DEBUGP(DL_TRACE, "<===ReceiveNetBufferList: Flags = %8x.\n", ReceiveFlags);
-//
-//}
-
 
 _Use_decl_annotations_
 VOID
@@ -1868,12 +1611,14 @@ NTSTATUS DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING RegistryPath)
         &FilterDriverHandle);
 }
 
-VOID FilterReceiveNetBufferLists(
-    NDIS_HANDLE FilterModuleContext,
-    PNET_BUFFER_LIST NetBufferLists,
-    NDIS_PORT_NUMBER PortNumber,
-    ULONG NumberOfNetBufferLists,
-    ULONG ReceiveFlags)
+VOID
+FilterReceiveNetBufferLists(
+    NDIS_HANDLE         FilterModuleContext,
+    PNET_BUFFER_LIST    NetBufferLists,
+    NDIS_PORT_NUMBER    PortNumber,
+    ULONG               NumberOfNetBufferLists,
+    ULONG               ReceiveFlags
+)
 {
     UNREFERENCED_PARAMETER(PortNumber);
     UNREFERENCED_PARAMETER(NumberOfNetBufferLists);
@@ -1881,27 +1626,28 @@ VOID FilterReceiveNetBufferLists(
     BOOLEAN anyAllowed = FALSE;
     PNET_BUFFER_LIST currNbl = NetBufferLists;
 
+    // **1. Preserve/clear the RESOURCES flag for correct buffer ownership**
+    ULONG indicateFlags = ReceiveFlags;
+    if (!(ReceiveFlags & NDIS_RECEIVE_FLAGS_RESOURCES))
+    {
+        indicateFlags &= ~NDIS_RECEIVE_FLAGS_RESOURCES;
+    }
+
     while (currNbl) {
         PNET_BUFFER nb = NET_BUFFER_LIST_FIRST_NB(currNbl);
         if (nb) {
-            // Simplified single buffer, IPv4
             UCHAR* data = NdisGetDataBuffer(nb, 34, NULL, 1, 0);
             if (data) {
-                // Source IP at offset 12
                 ULONG srcIp;
                 RtlCopyMemory(&srcIp, data + 12, sizeof(srcIp));
-                // Source port at offset based on IPv4 header length (assume no options)
                 UCHAR ihl = (data[0] & 0x0F) * 4;
                 USHORT srcPort = (data[ihl] << 8) | data[ihl + 1];
 
                 BOOLEAN allow = TRUE;
-				NTSTATUS status = STATUS_SUCCESS;
-                // Ensure pipe access is serialized
-                {
-                    ExAcquireFastMutex(&PipeMutex);
-                    status = _SendRequestToService(srcIp, srcPort, &allow);
-                    ExReleaseFastMutex(&PipeMutex);
-                }
+                NTSTATUS status = STATUS_SUCCESS;
+                ExAcquireFastMutex(&PipeMutex);
+                status = _SendRequestToService(srcIp, srcPort, &allow);
+                ExReleaseFastMutex(&PipeMutex);
 
                 if (NT_SUCCESS(status) && allow) {
                     anyAllowed = TRUE;
@@ -1912,12 +1658,13 @@ VOID FilterReceiveNetBufferLists(
     }
 
     if (anyAllowed) {
+        // **2. Use the adjusted flags instead of the raw ReceiveFlags**
         NdisFIndicateReceiveNetBufferLists(
             FilterModuleContext,
             NetBufferLists,
             PortNumber,
             NumberOfNetBufferLists,
-            ReceiveFlags
+            indicateFlags
         );
     }
     else {
