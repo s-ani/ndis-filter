@@ -104,7 +104,8 @@ Return Value:
     return NDIS_STATUS_SUCCESS;
 }
 
-
+// Called by NDIS Framework when a network adapter is being bound.
+// 2. Open the pipe connection from this function.
 _Use_decl_annotations_
 NDIS_STATUS
 FilterAttach(
@@ -1074,72 +1075,6 @@ NOTE: called at PASSIVE_LEVEL
     return Status;
 }
 
-_Use_decl_annotations_
-VOID
-FilterSendNetBufferLists(
-    NDIS_HANDLE         FilterModuleContext,
-    PNET_BUFFER_LIST    NetBufferLists,
-    NDIS_PORT_NUMBER    PortNumber,
-    ULONG               SendFlags
-)
-{
-    // Retrieve filter context
-    PMS_FILTER pFilter = (PMS_FILTER)FilterModuleContext;
-    BOOLEAN anyAllowed = FALSE;
-    PNET_BUFFER_LIST currNbl = NetBufferLists;
-
-    // Loop through each NBL and ask service for decision
-    while (currNbl)
-    {
-        // For brevity, parsing code omitted; assume srcIp and srcPort retrieved
-        ULONG srcIp = 0;
-        USHORT srcPort = 0;
-
-        BOOLEAN allow = FALSE;
-        NTSTATUS status;
-        ExAcquireFastMutex(&PipeMutex);
-        status = _SendRequestToService(srcIp, srcPort, &allow);
-        ExReleaseFastMutex(&PipeMutex);
-
-        if (NT_SUCCESS(status) && allow)
-        {
-            anyAllowed = TRUE;
-        }
-
-        currNbl = NET_BUFFER_LIST_NEXT_NBL(currNbl);
-    }
-
-    if (anyAllowed)
-    {
-        NdisFSendNetBufferLists(
-            pFilter->FilterHandle,
-            NetBufferLists,
-            PortNumber,
-            SendFlags
-        );
-    }
-    // else drop by not calling forward
-}
-
-_Use_decl_annotations_
-VOID
-FilterSendNetBufferListsComplete(
-    NDIS_HANDLE         FilterModuleContext,
-    PNET_BUFFER_LIST    NetBufferLists,
-    ULONG               SendCompleteFlags
-)
-{
-    // Retrieve filter context
-    PMS_FILTER pFilter = (PMS_FILTER)FilterModuleContext;
-
-    // Complete the send
-    NdisFSendNetBufferListsComplete(
-        pFilter->FilterHandle,
-        NetBufferLists,
-        SendCompleteFlags
-    );
-}
-
 
 _Use_decl_annotations_
 VOID
@@ -1597,7 +1532,9 @@ NDIS_FILTER_DRIVER_CHARACTERISTICS FilterChars = {
     .ReceiveNetBufferListsHandler = FilterReceiveNetBufferLists,
 };
 
-// Entry point for the driver. Registers this filter with NDIS
+// Entry point for the driver. Registers this filter with NDIS.
+// Called by Windows I/O Manager when driver is loaded.
+// 1. Initializes globals
 NTSTATUS DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING RegistryPath)
 {
     UNREFERENCED_PARAMETER(RegistryPath);
@@ -1611,6 +1548,7 @@ NTSTATUS DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING RegistryPath)
         &FilterDriverHandle);
 }
 
+// Called by Miniport Driver below (network card driver) indicating packets up.
 VOID
 FilterReceiveNetBufferLists(
     NDIS_HANDLE         FilterModuleContext,
@@ -1676,6 +1614,75 @@ FilterReceiveNetBufferLists(
     }
 }
 
+// Called by Protocol Drivers above (TCP/IP stack) sending packets down. 
+// Parses the packets, write ip:port into named pipe, and read 0/1 response from the same pipe. 
+// Based on response, we accept or reject the packet.
+_Use_decl_annotations_
+VOID
+FilterSendNetBufferLists(
+    NDIS_HANDLE         FilterModuleContext,
+    PNET_BUFFER_LIST    NetBufferLists,
+    NDIS_PORT_NUMBER    PortNumber,
+    ULONG               SendFlags
+)
+{
+    // Retrieve filter context
+    PMS_FILTER pFilter = (PMS_FILTER)FilterModuleContext;
+    BOOLEAN anyAllowed = FALSE;
+    PNET_BUFFER_LIST currNbl = NetBufferLists;
+
+    // Loop through each NBL and ask service for decision
+    while (currNbl)
+    {
+        // For brevity, parsing code omitted; assume srcIp and srcPort retrieved
+        ULONG srcIp = 0;
+        USHORT srcPort = 0;
+
+        BOOLEAN allow = FALSE;
+        NTSTATUS status;
+        ExAcquireFastMutex(&PipeMutex);
+        status = _SendRequestToService(srcIp, srcPort, &allow);
+        ExReleaseFastMutex(&PipeMutex);
+
+        if (NT_SUCCESS(status) && allow)
+        {
+            anyAllowed = TRUE;
+        }
+
+        currNbl = NET_BUFFER_LIST_NEXT_NBL(currNbl);
+    }
+
+    if (anyAllowed)
+    {
+        NdisFSendNetBufferLists(
+            pFilter->FilterHandle,
+            NetBufferLists,
+            PortNumber,
+            SendFlags
+        );
+    }
+    // else drop by not calling forward
+}
+
+_Use_decl_annotations_
+VOID
+FilterSendNetBufferListsComplete(
+    NDIS_HANDLE         FilterModuleContext,
+    PNET_BUFFER_LIST    NetBufferLists,
+    ULONG               SendCompleteFlags
+)
+{
+    // Retrieve filter context
+    PMS_FILTER pFilter = (PMS_FILTER)FilterModuleContext;
+
+    // Complete the send
+    NdisFSendNetBufferListsComplete(
+        pFilter->FilterHandle,
+        NetBufferLists,
+        SendCompleteFlags
+    );
+}
+
 // ----------------------------------------------------------------------------
 // _OpenPipe: ZwCreateFile to named pipe
 // ----------------------------------------------------------------------------
@@ -1720,7 +1727,7 @@ NTSTATUS _SendRequestToService(
     RtlStringCbPrintfA(msg, sizeof(msg), "%u.%u.%u.%u:%hu",
         bytes[0], bytes[1], bytes[2], bytes[3], SrcPort);
 
-    // Write UTF-8 message
+    // Write UTF-8 message to the named pipe
     status = ZwWriteFile(
         PipeHandle, NULL, NULL, NULL,
         &iosb, msg, (ULONG)strlen(msg), NULL, NULL);
