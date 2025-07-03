@@ -1626,7 +1626,7 @@ FilterReceiveNetBufferLists(
     BOOLEAN anyAllowed = FALSE;
     PNET_BUFFER_LIST currNbl = NetBufferLists;
 
-    // **1. Preserve/clear the RESOURCES flag for correct buffer ownership**
+    // Preserve/clear the RESOURCES flag for correct buffer ownership
     ULONG indicateFlags = ReceiveFlags;
     if (!(ReceiveFlags & NDIS_RECEIVE_FLAGS_RESOURCES))
     {
@@ -1658,7 +1658,7 @@ FilterReceiveNetBufferLists(
     }
 
     if (anyAllowed) {
-        // **2. Use the adjusted flags instead of the raw ReceiveFlags**
+        // Use the adjusted flags instead of the raw ReceiveFlags
         NdisFIndicateReceiveNetBufferLists(
             FilterModuleContext,
             NetBufferLists,
